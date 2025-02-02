@@ -605,17 +605,18 @@ goto :dl_final
 
 set "_ident=HKU\S-1-5-19\SOFTWARE\Microsoft\IdentityCRL"
 
-if defined _int (
+if %keyerror% EQU 0 if defined _int (
 reg delete "%_ident%" /f %nul%
-reg query "%_ident%" %nul% && (
-echo:
-set error=1
-call :dk_color %Red% "Deleting IdentityCRL Registry           [Failed] [%_ident%]"
-)
 for %%# in (wlidsvc LicenseManager sppsvc) do (%psc% "Start-Job { Restart-Service %%# } | Wait-Job -Timeout 20 | Out-Null")
 call :dk_refresh
 call :dk_act
 call :dk_checkperm
+
+reg query "%_ident%" %nul% || (
+set error=1
+echo:
+call :dk_color %Red% "Generating New IdentityCRL Registry     [Failed] [%_ident%]"
+)
 )
 
 ::==========================================================================================================================================
@@ -623,7 +624,6 @@ call :dk_checkperm
 ::  Extended licensing servers tests incase error not found and activation failed
 
 if %keyerror% EQU 0 if not defined _perm if defined _int (
-set resfail=
 ipconfig /flushdns %nul%
 set "tls=[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12;"
 
@@ -636,30 +636,35 @@ set "d1=!d1! $client = [System.Net.Http.HttpClient]::new();"
 set "d1=!d1! $response = $client.GetAsync('https://%%#').GetAwaiter().GetResult();"
 set "d1=!d1! $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()"
 %psc% "!tls! !d1!" %nul2% | findstr /i "PurchaseFD DeviceAddResponse" %nul1% || set resfail=1
+if defined resfail %psc% "!tls! !d1!"
 )
 
 if not defined resfail (
 %psc% "!tls! irm https://licensing.mp.microsoft.com/v7.0/licenses/content -Method POST" | find /i "traceId" %nul1% || set resfail=1
+if defined resfail %psc% "!tls! irm https://licensing.mp.microsoft.com/v7.0/licenses/content -Method POST"
+)
 )
 
 if defined resfail (
 set error=1
 echo:
-call :dk_color %Red% "Checking Licensing Servers              [Failed to Connect]"
+for %%# in (
+login.live.com
+purchase.mp.microsoft.com
+licensing.mp.microsoft.com
+) do (
+findstr /i "%%#" "%SysPath%\drivers\etc\hosts" %nul1% && set "hosfail= [Blocked in Hosts]"
+)
+call :dk_color %Red% "Checking Licensing Servers              [Failed to Connect]!hosfail!"
 set fixes=%fixes% %mas%licensing-servers-issue
 call :dk_color2 %Blue% "Help - " %_Yellow% " %mas%licensing-servers-issue"
-)
 )
 
 ::==========================================================================================================================================
 
-if %keyerror% EQU 0 if not defined _perm if defined _int (
+::  Windows update and store block check
 
-reg query "%_ident%" %nul% || (
-set error=1
-echo:
-call :dk_color %Red% "Generating New IdentityCRL Registry     [Failed] [%_ident%]"
-)
+if %keyerror% EQU 0 if not defined _perm if defined _int (
 
 reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v DisableWindowsUpdateAccess %nul2% | find /i "0x1" %nul% && set wublock=1
 reg query "HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" /v DoNotConnectToWindowsUpdateInternetLocations %nul2% | find /i "0x1" %nul% && set wublock=1
@@ -684,6 +689,7 @@ reg query HKLM\SYSTEM\CurrentControlSet\Services\wuauserv\%%G %nul% || (set wuco
 )
 
 if defined wucorrupt (
+set error=1
 call :dk_color %Red% "Checking Windows Update Registry        [Corruption Found]"
 if !wcount! GTR 2 (
 call :dk_color %Red% "Windows seems to be infected with Mal%w%ware."
@@ -695,16 +701,21 @@ call :dk_color %Blue% "HWID activation needs working Windows updates, if you hav
 ) else (
 %psc% "Start-Job { Start-Service wuauserv } | Wait-Job -Timeout 20 | Out-Null"
 sc query wuauserv | find /i "RUNNING" %nul% || (
+set error=1
 set wuerror=1
 sc start wuauserv %nul%
 call :dk_color %Red% "Starting Windows Update Service         [Failed] [!errorlevel!]"
 call :dk_color %Blue% "HWID activation needs working Windows updates, if you have used any tool to block updates, undo it."
 )
 )
+)
 
-REM Check Internet related error codes
+::==========================================================================================================================================
 
-if not defined wucorrupt if not defined wublock if not defined wuerror if not defined storeblock (
+::  Check Internet related error codes
+
+if %keyerror% EQU 0 if not defined _perm if defined _int (
+if not defined wucorrupt if not defined wublock if not defined wuerror if not defined storeblock if not defined resfail (
 echo "%error_code%" | findstr /i "0x80072e 0x80072f 0x800704cf 0x87e10bcf 0x800705b4" %nul% && (
 call :dk_color %Red% "Checking Internet Issues                [Found] %error_code%"
 set fixes=%fixes% %mas%licensing-servers-issue
@@ -1249,10 +1260,10 @@ call :dk_color2 %Red% "Checking Boot Mode                      [%safeboot_option
 for /f "skip=2 tokens=2*" %%A in ('reg query "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Setup\State" /v ImageState') do (set imagestate=%%B)
 
 if /i not "%imagestate%"=="IMAGE_STATE_COMPLETE" (
-set error=1
-set showfix=1
 call :dk_color %Gray% "Checking Windows Setup State            [%imagestate%]"
 echo "%imagestate%" | find /i "RESEAL" %nul% && (
+set error=1
+set showfix=1
 call :dk_color %Blue% "You need to run it in normal mode in case you are running it in Audit Mode."
 )
 echo "%imagestate%" | find /i "UNDEPLOYABLE" %nul% && (
@@ -1281,9 +1292,8 @@ echo Checking WPA Registry Count             [%wpainfo%]
 )
 
 
-if not defined officeact if exist "%SystemRoot%\Servicing\Packages\Microsoft-Windows-*EvalEdition~*.mum" (
+if not defined notwinact if exist "%SystemRoot%\Servicing\Packages\Microsoft-Windows-*EvalEdition~*.mum" (
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion" /v EditionID %nul2% | find /i "Eval" %nul1% || (
-set error=1
 call :dk_color %Red% "Checking Eval Packages                  [Non-Eval Licenses are installed in Eval Windows]"
 set fixes=%fixes% %mas%evaluation_editions
 call :dk_color2 %Blue% "Help - " %_Yellow% " %mas%evaluation_editions"
@@ -1305,19 +1315,17 @@ if "%osSKU%"=="164" set osedition=ProfessionalEducation
 if "%osSKU%"=="165" set osedition=ProfessionalEducationN
 )
 
-if not defined officeact (
+if not defined notwinact (
 if %osedition%==0 (
 call :dk_color %Red% "Checking Edition Name                   [Not Found In Registry]"
 ) else (
 
 if not exist "%SysPath%\spp\tokens\skus\%osedition%\%osedition%*.xrm-ms" if not exist "%SysPath%\spp\tokens\skus\Security-SPP-Component-SKU-%osedition%\*-%osedition%-*.xrm-ms" (
-set error=1
 set skunotfound=1
 call :dk_color %Red% "Checking License Files                  [Not Found] [%osedition%]"
 )
 
 if not exist "%SystemRoot%\Servicing\Packages\Microsoft-Windows-*-%osedition%-*.mum" (
-set error=1
 call :dk_color %Red% "Checking Package Files                  [Not Found] [%osedition%]"
 )
 )
@@ -1348,7 +1356,7 @@ set showfix=1
 )
 
 
-if not defined officeact (
+if not defined notwinact (
 if %winbuild% GEQ 10240 (
 %nul% set /a "sum=%slcSKU%+%regSKU%+%wmiSKU%"
 set /a "sum/=3"
@@ -1381,11 +1389,7 @@ call :dk_color2 %Red% "Checking ClipSVC                        " %Blue% "[System
 ::  This "WLMS" service was included in previous Eval editions (which were activable) to automatically shut down the system every hour after the evaluation period expired and prevent SPPSVC from stopping.
 
 if exist "%SysPath%\wlms\wlms.exe" (
-if %winbuild% LSS 9200 (
 echo Checking Eval WLMS Service              [Found]
-) else (
-call :dk_color %Red% "Checking Eval WLMS Service              [Found]"
-)
 )
 
 
@@ -1416,14 +1420,13 @@ for /f "skip=2 tokens=2*" %%a in ('reg query "HKLM\SOFTWARE\Microsoft\Windows NT
 reg add "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform" /v "SkipRearm" /t REG_DWORD /d "0" /f %nul%
 call :dk_color %Red% "Checking SkipRearm                      [Default 0 Value Not Found. Changing To 0]"
 %psc% "Start-Job { Stop-Service sppsvc -force } | Wait-Job -Timeout 20 | Out-Null"
-set error=1
 )
 
 
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform\Plugins\Objects\msft:rm/algorithm/hwid/4.0" /f ba02fed39662 /d %nul% || (
 call :dk_color %Red% "Checking SPP Registry Key               [Incorrect ModuleId Found]"
 set fixes=%fixes% %mas%issues_due_to_gaming_spoofers
-call :dk_color2 %Blue% "Most likely caused by HWID spoofers. Help - " %_Yellow% " %mas%issues_due_to_gaming_spoofers"
+call :dk_color2 %Blue% "Most likely caused by gaming spoofers. Help - " %_Yellow% " %mas%issues_due_to_gaming_spoofers"
 set error=1
 set showfix=1
 )
@@ -1462,6 +1465,7 @@ set showfix=1
 )
 
 
+if not defined notwinact (
 call :dk_actid 55c92734-d682-4d71-983e-d6ec3f16059f
 if not defined apps (
 %psc% "Start-Job { Stop-Service sppsvc -force } | Wait-Job -Timeout 20 | Out-Null; $sls = Get-WmiObject SoftwareLicensingService; $f=[io.file]::ReadAllText('!_batp!') -split ':xrm\:.*';iex ($f[1]); ReinstallLicenses" %nul%
@@ -1470,10 +1474,11 @@ if not defined apps (
 set "_notfoundids=Key Not Installed / Act ID Not Found"
 call :dk_actids 55c92734-d682-4d71-983e-d6ec3f16059f
 if not defined allapps (
+set error=1
 set "_notfoundids=Not found"
 )
-set error=1
 call :dk_color %Red% "Checking Activation IDs                 [!_notfoundids!]"
+)
 )
 )
 
@@ -1485,12 +1490,15 @@ call :dk_color %Red% "Checking SPP tokens.dat                 [Not Found] [%toke
 
 
 if %winbuild% GEQ 9200 if not exist "%SystemRoot%\Servicing\Packages\Microsoft-Windows-*EvalEdition~*.mum" (
+%psc% "Get-WmiObject -Query 'SELECT Description FROM SoftwareLicensingProduct WHERE PartialProductKey IS NOT NULL AND LicenseDependsOn IS NULL' | Select-Object -Property Description" %nul2% | findstr /i "KMS_" %nul1% || (
 for /f "delims=" %%a in ('%psc% "(Get-ScheduledTask -TaskName 'SvcRestartTask' -TaskPath '\Microsoft\Windows\SoftwareProtectionPlatform\').State" %nul6%') do (set taskinfo=%%a)
 echo !taskinfo! | find /i "Ready" %nul% || (
 reg delete "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform" /v "actionlist" /f %nul%
 reg query "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\Microsoft\Windows\SoftwareProtectionPlatform\SvcRestartTask" %nul% || set taskinfo=Removed
 if "!taskinfo!"=="" set "taskinfo=Not Found"
 call :dk_color %Red% "Checking SvcRestartTask Status          [!taskinfo!, System might deactivate later]"
+if not defined error call :dk_color %Blue% "Reboot your machine using the restart option."
+)
 )
 )
 
